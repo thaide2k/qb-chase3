@@ -8,10 +8,21 @@ local QBCore = exports['qb-core']:GetCoreObject()
 local activePursuit = nil
 local pursuitVehicles = {}
 local playerVeh = nil
+local debugging = true -- Ativar depuração
+
+-- Função de debug
+function DebugLog(message)
+    if debugging then
+        print("[qb-chase3:DEBUG:CLIENT] " .. message)
+        TriggerEvent('QBCore:Notify', 'DEBUG: ' .. message, 'primary', 3000)
+    end
+end
 
 -- Função para exibir mensagem grande na tela
 RegisterNetEvent('qb-chase3:client:ShowNotification')
 AddEventHandler('qb-chase3:client:ShowNotification', function(message, time)
+    DebugLog("Mostrando notificação: " .. message)
+    
     time = time or 5000
     local scaleform = RequestScaleformMovie("mp_big_message_freemode")
     
@@ -37,7 +48,10 @@ end)
 -- Iniciar perseguição
 RegisterNetEvent('qb-chase3:client:StartPursuit')
 AddEventHandler('qb-chase3:client:StartPursuit', function(config)
+    DebugLog("Evento StartPursuit recebido com config: " .. json.encode(config))
+    
     if activePursuit then
+        DebugLog("Perseguição já ativa, ignorando novo início")
         TriggerEvent('QBCore:Notify', 'Você já está em uma perseguição!', 'error')
         return
     end
@@ -52,6 +66,7 @@ AddEventHandler('qb-chase3:client:StartPursuit', function(config)
     
     -- Verificar se o jogador está em um veículo
     if playerVeh == 0 then
+        DebugLog("Jogador não está em um veículo")
         TriggerEvent('QBCore:Notify', 'Você precisa estar em um veículo para iniciar a perseguição!', 'error')
         activePursuit = nil
         return
@@ -61,6 +76,8 @@ AddEventHandler('qb-chase3:client:StartPursuit', function(config)
     local netId = NetworkGetNetworkIdFromEntity(playerVeh)
     local playerCoords = GetEntityCoords(PlayerPedId())
     local heading = GetEntityHeading(playerVeh)
+    
+    DebugLog("Enviando setup para o servidor com netId: " .. netId)
     
     -- Enviar informações para o servidor
     TriggerServerEvent('qb-chase3:server:PursuitSetup', netId, playerCoords, heading)
@@ -72,6 +89,8 @@ end)
 -- Criar veículo perseguidor
 RegisterNetEvent('qb-chase3:client:CreatePursuer')
 AddEventHandler('qb-chase3:client:CreatePursuer', function(modelHash, spawnPoint, playerVehicleNetId)
+    DebugLog("Criando perseguidor com modelo: " .. modelHash .. " em " .. json.encode(spawnPoint))
+    
     -- Carregar o modelo
     RequestModel(modelHash)
     while not HasModelLoaded(modelHash) do
@@ -81,6 +100,13 @@ AddEventHandler('qb-chase3:client:CreatePursuer', function(modelHash, spawnPoint
     -- Criar veículo
     local vehicle = CreateVehicle(modelHash, spawnPoint.x, spawnPoint.y, spawnPoint.z, 0.0, true, true)
     SetModelAsNoLongerNeeded(modelHash)
+    
+    if not DoesEntityExist(vehicle) then
+        DebugLog("ERRO: Falha ao criar veículo perseguidor")
+        return
+    end
+    
+    DebugLog("Veículo perseguidor criado com sucesso")
     
     -- Melhorar o veículo perseguidor
     SetVehicleEngineOn(vehicle, true, true, false)
@@ -123,10 +149,14 @@ AddEventHandler('qb-chase3:client:CreatePursuer', function(modelHash, spawnPoint
         driver = driver,
         blip = blip
     })
+    
+    DebugLog("Perseguidor totalmente configurado")
 end)
 
 -- Monitorar o estado da perseguição
 function StartPursuitMonitoring()
+    DebugLog("Iniciando monitoramento da perseguição")
+    
     Citizen.CreateThread(function()
         while activePursuit do
             Citizen.Wait(500)
@@ -137,19 +167,25 @@ function StartPursuitMonitoring()
             
             -- Verificar se o jogador saiu do veículo
             if not inVehicle and playerVeh ~= 0 then
+                DebugLog("Jogador saiu do veículo, finalizando perseguição")
                 TriggerServerEvent('qb-chase3:server:StatusUpdate', {leftVehicle = true})
                 break
             end
             
             -- Atualizar referência do veículo se o jogador trocar de veículo
             if inVehicle and currentVeh ~= playerVeh then
+                DebugLog("Jogador trocou de veículo")
                 playerVeh = currentVeh
             end
             
             -- Verificar estado do veículo do jogador
-            if playerVeh ~= 0 and IsVehicleDestroyed(playerVeh) then
-                TriggerServerEvent('qb-chase3:server:StatusUpdate', {vehicleDestroyed = true})
-                break
+            if playerVeh ~= 0 and IsVehicleDamaged(playerVeh) then
+                -- Verificar se está destruído
+                if GetVehicleEngineHealth(playerVeh) <= 0 then
+                    DebugLog("Veículo do jogador destruído")
+                    TriggerServerEvent('qb-chase3:server:StatusUpdate', {vehicleDestroyed = true})
+                    break
+                end
             end
         end
     end)
@@ -158,7 +194,12 @@ end
 -- Verificar status da perseguição quando solicitado pelo servidor
 RegisterNetEvent('qb-chase3:client:CheckStatus')
 AddEventHandler('qb-chase3:client:CheckStatus', function()
-    if not activePursuit then return end
+    if not activePursuit then 
+        DebugLog("CheckStatus ignorado: perseguição não está ativa")
+        return 
+    end
+    
+    DebugLog("Verificando status da perseguição")
     
     local status = {
         leftVehicle = false,
@@ -173,7 +214,7 @@ AddEventHandler('qb-chase3:client:CheckStatus', function()
     
     -- Verifica se o veículo do jogador está destruído
     if playerVeh ~= 0 then
-        status.vehicleDestroyed = IsVehicleDestroyed(playerVeh)
+        status.vehicleDestroyed = (GetVehicleEngineHealth(playerVeh) <= 0)
     end
     
     -- Verificar perseguidores
@@ -181,7 +222,7 @@ AddEventHandler('qb-chase3:client:CheckStatus', function()
     local playerCoords = GetEntityCoords(playerPed)
     
     for i, data in ipairs(pursuitVehicles) do
-        if DoesEntityExist(data.vehicle) and not IsVehicleDestroyed(data.vehicle) then
+        if DoesEntityExist(data.vehicle) and not IsVehicleDamaged(data.vehicle) then
             activePursuers = activePursuers + 1
             
             -- Atualizar comportamento do motorista
@@ -208,6 +249,8 @@ AddEventHandler('qb-chase3:client:CheckStatus', function()
     
     status.allPursuersDestroyed = (activePursuers == 0)
     
+    DebugLog("Status: " .. json.encode(status))
+    
     -- Enviar status para o servidor
     TriggerServerEvent('qb-chase3:server:StatusUpdate', status)
 end)
@@ -216,6 +259,8 @@ end)
 RegisterNetEvent('qb-chase3:client:CleanupPursuit')
 AddEventHandler('qb-chase3:client:CleanupPursuit', function()
     if not activePursuit then return end
+    
+    DebugLog("Limpando perseguição")
     
     -- Limpar veículos e motoristas
     for _, data in ipairs(pursuitVehicles) do
@@ -235,7 +280,15 @@ AddEventHandler('qb-chase3:client:CleanupPursuit', function()
     pursuitVehicles = {}
     activePursuit = nil
     playerVeh = nil
+    
+    DebugLog("Perseguição finalizada e limpa")
 end)
+
+-- Comando para teste manual
+RegisterCommand('iniciarperseguicao', function()
+    DebugLog("Comando de teste manual executado")
+    TriggerServerEvent('qb-chase3:server:TestStart')
+end, false)
 
 -- Função auxiliar para desenhar texto na tela
 function DrawText3D(x, y, z, text)

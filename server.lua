@@ -6,53 +6,43 @@
 
 local QBCore = exports['qb-core']:GetCoreObject()
 local activePursuits = {}
-local chaseCars = {
-    `xls2`,   -- SUV blindado poderoso
-    `schafter4`, -- Carro rápido e resistente
-    `caracara2`,  -- Pickup monstruosa 
-    `buffalo3` -- Carro esportivo policial
-}
+local debugging = true -- Ativar depuração
 
-local messages = {
-    start = "~r~VOCÊ ESTÁ SENDO PERSEGUIDO!\n~w~Fuja ou destrua-os antes que eles destroem você!",
-    failed_exit = "~r~VOCÊ SAIU DO VEÍCULO\n~w~Perseguição perdida!",
-    failed_destroyed = "~r~SEU VEÍCULO FOI DESTRUÍDO\n~w~Perseguição perdida!",
-    success_distance = "~g~VOCÊ ESCAPOU!\n~w~Perseguição vencida!",
-    success_destroyed = "~g~VOCÊ DESTRUIU TODOS OS PERSEGUIDORES!\n~w~Perseguição vencida!"
-}
+-- Função de debug
+function DebugLog(message)
+    if debugging then
+        print("[qb-chase3:DEBUG:SERVER] " .. message)
+    end
+end
 
-local CONFIG = {
-    CHASE_CARS_COUNT = 4,         -- Número de carros perseguidores
-    WIN_DISTANCE = 200.0,         -- Distância para considerar a fuga (em unidades)
-    CHECK_INTERVAL = 1000,        -- Intervalo de verificação do estado da perseguição (em ms)
-    CHASE_MAX_RANGE = 300.0,      -- Distância máxima para os carros perseguidores seguirem o jogador
-    MESSAGE_DELAY = 10000,        -- Tempo para mostrar a mensagem inicial (em ms)
-    PURSUIT_TIMEOUT = 1200000,    -- Timeout da perseguição (20 minutos em ms)
-    WIN_CHECK_COUNT = 5,          -- Número de verificações consecutivas para considerar a vitória
-    SPAWN_DISTANCE = 70.0,        -- Distância de spawn dos perseguidores
-    REWARD_AMOUNT = 50            -- Quantidade de Kryon a ser premiada em caso de vitória
-}
+-- Carregar configurações do arquivo config.lua
+local Config = Config or {}
 
 -- Função para exibir mensagem grande na tela do jogador
 function ShowNotification(player, message, time)
+    DebugLog("Enviando notificação para " .. player .. ": " .. message)
     TriggerClientEvent('qb-chase3:client:ShowNotification', player, message, time or 5000)
 end
 
 -- Função para criar veículos perseguidores
 function CreatePursuitVehicles(player, playerVehicle, playerCoords, heading)
+    DebugLog("Criando veículos perseguidores para jogador " .. player)
     local vehicles = {}
     
-    for i = 1, CONFIG.CHASE_CARS_COUNT do
-        local spawnPoint = GetSpawnPointAroundPlayer(playerCoords, CONFIG.SPAWN_DISTANCE, playerVehicle)
+    for i = 1, Config.PursuitSettings.CHASE_CARS_COUNT do
+        local spawnPoint = GetSpawnPointAroundPlayer(playerCoords, Config.PursuitSettings.SPAWN_DISTANCE, playerVehicle)
         
         if spawnPoint then
-            local modelHash = chaseCars[math.random(#chaseCars)]
+            local modelHash = Config.ChaseVehicles[math.random(#Config.ChaseVehicles)]
             
+            DebugLog("Enviando evento para criar perseguidor: " .. modelHash)
             TriggerClientEvent('qb-chase3:client:CreatePursuer', player, modelHash, spawnPoint, playerVehicle)
             table.insert(vehicles, {
                 model = modelHash,
                 spawnPoint = spawnPoint
             })
+        else
+            DebugLog("Falha ao encontrar ponto de spawn para perseguidor " .. i)
         end
     end
     
@@ -85,16 +75,23 @@ end
 
 -- Terminar perseguição
 function EndPursuit(playerId, success, reason)
-    if not activePursuits[playerId] then return end
+    if not activePursuits[playerId] then 
+        DebugLog("Tentativa de encerrar perseguição inexistente para jogador " .. playerId)
+        return 
+    end
+    
+    DebugLog("Encerrando perseguição para jogador " .. playerId .. ", sucesso: " .. tostring(success))
     
     local pursuitData = activePursuits[playerId]
     
     -- Limpar temporizadores
     if pursuitData.checkTimer then
+        DebugLog("Limpando timer de verificação")
         clearTimeout(pursuitData.checkTimer)
     end
     
     if pursuitData.timeout then
+        DebugLog("Limpando timer de timeout")
         clearTimeout(pursuitData.timeout)
     end
     
@@ -103,54 +100,69 @@ function EndPursuit(playerId, success, reason)
         local xPlayer = QBCore.Functions.GetPlayer(playerId)
         if xPlayer then
             -- Adicionar kryon ao jogador
-            xPlayer.Functions.AddItem('kryon', CONFIG.REWARD_AMOUNT)
+            DebugLog("Adicionando " .. Config.Reward.kryon .. " kryon ao jogador")
+            xPlayer.Functions.AddItem('kryon', Config.Reward.kryon)
             TriggerClientEvent('inventory:client:ItemBox', playerId, QBCore.Shared.Items["kryon"], "add")
             
             -- Marcar evento como concluído para o tablet
+            DebugLog("Marcando evento como concluído no tablet")
             exports['qb-tablet']:MarkEventCompleted(playerId, 'event_1')
         end
         
         -- Mostrar mensagem de sucesso
-        ShowNotification(playerId, reason or messages.success_distance)
+        ShowNotification(playerId, reason or Config.Messages.success_distance)
     else
         -- Mostrar mensagem de falha
-        ShowNotification(playerId, reason or messages.failed_destroyed)
+        ShowNotification(playerId, reason or Config.Messages.failed_destroyed)
     end
     
     -- Limpar perseguidores que sobraram
+    DebugLog("Enviando comando de limpeza para o cliente")
     TriggerClientEvent('qb-chase3:client:CleanupPursuit', playerId)
     
     -- Remover da lista de perseguições ativas
     activePursuits[playerId] = nil
+    DebugLog("Perseguição encerrada com sucesso")
 end
 
 -- Verificar o estado da perseguição
 function CheckPursuitStatus(playerId)
     local pursuitData = activePursuits[playerId]
-    if not pursuitData then return end
+    if not pursuitData then 
+        DebugLog("CheckPursuitStatus: perseguição inexistente para jogador " .. playerId)
+        return 
+    end
     
     local player = QBCore.Functions.GetPlayer(playerId)
     if not player then
+        DebugLog("CheckPursuitStatus: jogador " .. playerId .. " não encontrado")
         EndPursuit(playerId, false, "O jogador saiu do servidor")
         return
     end
     
     -- Solicitar verificação do cliente
+    DebugLog("Solicitando verificação de status do cliente")
     TriggerClientEvent('qb-chase3:client:CheckStatus', playerId)
     
     -- Agendar próxima verificação
     pursuitData.checkTimer = setTimeout(function()
         CheckPursuitStatus(playerId)
-    end, CONFIG.CHECK_INTERVAL)
+    end, Config.PursuitSettings.CHECK_INTERVAL)
 end
 
 -- Iniciar perseguição
 function StartPursuit(playerId)
+    DebugLog("Tentando iniciar perseguição para jogador " .. playerId)
+    
     local player = QBCore.Functions.GetPlayer(playerId)
-    if not player then return false end
+    if not player then 
+        DebugLog("StartPursuit: jogador " .. playerId .. " não encontrado")
+        return false 
+    end
     
     -- Verificar se o jogador já está em uma perseguição
     if activePursuits[playerId] then
+        DebugLog("StartPursuit: jogador já está em uma perseguição")
         return false, "Jogador já está em uma perseguição"
     end
     
@@ -163,18 +175,20 @@ function StartPursuit(playerId)
     }
     
     -- Solicitar ao cliente para iniciar a perseguição
-    TriggerClientEvent('qb-chase3:client:StartPursuit', playerId, CONFIG)
+    DebugLog("Enviando evento StartPursuit para o cliente")
+    TriggerClientEvent('qb-chase3:client:StartPursuit', playerId, Config.PursuitSettings)
     
     -- Configurar timeout para a perseguição
     activePursuits[playerId].timeout = setTimeout(function()
         EndPursuit(playerId, false, "~r~TEMPO ESGOTADO!\n~w~Você não conseguiu escapar a tempo.")
-    end, CONFIG.PURSUIT_TIMEOUT)
+    end, Config.PursuitSettings.PURSUIT_TIMEOUT)
     
     -- Iniciar verificações de status
     setTimeout(function()
         CheckPursuitStatus(playerId)
-    end, CONFIG.CHECK_INTERVAL)
+    end, Config.PursuitSettings.CHECK_INTERVAL)
     
+    DebugLog("Perseguição iniciada com sucesso")
     return true
 end
 
@@ -183,9 +197,32 @@ end
 -- Evento para iniciar a perseguição (chamado pelo qb-tablet)
 RegisterNetEvent('qb-chase3:server:startEvent')
 AddEventHandler('qb-chase3:server:startEvent', function(playerId, eventData)
+    DebugLog("Evento startEvent recebido do tablet para jogador " .. playerId)
+    
+    -- Se o evento for chamado sem especificar playerId, usar o source
+    if not playerId then
+        playerId = source
+        DebugLog("Usando source como playerId: " .. playerId)
+    end
+    
     local success, errorMsg = StartPursuit(playerId)
     
     if not success and errorMsg then
+        DebugLog("Falha ao iniciar perseguição: " .. errorMsg)
+        ShowNotification(playerId, "~r~ERRO: " .. errorMsg)
+    end
+end)
+
+-- Evento de teste manual
+RegisterNetEvent('qb-chase3:server:TestStart')
+AddEventHandler('qb-chase3:server:TestStart', function()
+    local playerId = source
+    DebugLog("Evento de teste manual recebido de " .. playerId)
+    
+    local success, errorMsg = StartPursuit(playerId)
+    
+    if not success and errorMsg then
+        DebugLog("Falha ao iniciar perseguição de teste: " .. errorMsg)
         ShowNotification(playerId, "~r~ERRO: " .. errorMsg)
     end
 end)
@@ -194,7 +231,12 @@ end)
 RegisterNetEvent('qb-chase3:server:PursuitSetup')
 AddEventHandler('qb-chase3:server:PursuitSetup', function(vehicleNetId, playerCoords, heading)
     local playerId = source
-    if not activePursuits[playerId] then return end
+    DebugLog("PursuitSetup recebido do jogador " .. playerId)
+    
+    if not activePursuits[playerId] then 
+        DebugLog("PursuitSetup: perseguição não encontrada para jogador " .. playerId)
+        return 
+    end
     
     activePursuits[playerId].playerVehicle = vehicleNetId
     activePursuits[playerId].vehicles = CreatePursuitVehicles(playerId, vehicleNetId, playerCoords, heading)
@@ -202,43 +244,57 @@ AddEventHandler('qb-chase3:server:PursuitSetup', function(vehicleNetId, playerCo
     -- Mostrar mensagem inicial após delay para dar tempo dos perseguidores se aproximarem
     setTimeout(function()
         if activePursuits[playerId] then
-            ShowNotification(playerId, messages.start)
+            DebugLog("Exibindo mensagem inicial de perseguição")
+            ShowNotification(playerId, Config.Messages.start)
         end
-    end, CONFIG.MESSAGE_DELAY)
+    end, Config.PursuitSettings.MESSAGE_DELAY)
 end)
 
 RegisterNetEvent('qb-chase3:server:StatusUpdate')
 AddEventHandler('qb-chase3:server:StatusUpdate', function(status)
     local playerId = source
-    if not activePursuits[playerId] then return end
+    DebugLog("StatusUpdate recebido de " .. playerId .. ": " .. json.encode(status))
+    
+    if not activePursuits[playerId] then 
+        DebugLog("StatusUpdate: perseguição não encontrada para jogador " .. playerId)
+        return 
+    end
     
     -- Verificar condições de derrota
     if status.leftVehicle then
-        EndPursuit(playerId, false, messages.failed_exit)
+        DebugLog("Jogador saiu do veículo - derrota")
+        EndPursuit(playerId, false, Config.Messages.failed_exit)
         return
     end
     
     if status.vehicleDestroyed then
-        EndPursuit(playerId, false, messages.failed_destroyed)
+        DebugLog("Veículo do jogador destruído - derrota")
+        EndPursuit(playerId, false, Config.Messages.failed_destroyed)
         return
     end
     
     -- Verificar condições de vitória
     if status.allPursuersDestroyed then
-        EndPursuit(playerId, true, messages.success_destroyed)
+        DebugLog("Todos os perseguidores destruídos - vitória")
+        EndPursuit(playerId, true, Config.Messages.success_destroyed)
         return
     end
     
     -- Verificar distância dos perseguidores
-    if status.minDistance > CONFIG.WIN_DISTANCE then
+    if status.minDistance > Config.PursuitSettings.WIN_DISTANCE then
         activePursuits[playerId].distanceCounter = activePursuits[playerId].distanceCounter + 1
+        DebugLog("Distância suficiente, contador = " .. activePursuits[playerId].distanceCounter)
         
         -- Vitória por distância após várias verificações consecutivas
-        if activePursuits[playerId].distanceCounter >= CONFIG.WIN_CHECK_COUNT then
-            EndPursuit(playerId, true, messages.success_distance)
+        if activePursuits[playerId].distanceCounter >= Config.PursuitSettings.WIN_CHECK_COUNT then
+            DebugLog("Distância mantida por tempo suficiente - vitória")
+            EndPursuit(playerId, true, Config.Messages.success_distance)
         end
     else
         -- Resetar contador se algum perseguidor se aproximou
+        if activePursuits[playerId].distanceCounter > 0 then
+            DebugLog("Perseguidor se aproximou, resetando contador")
+        end
         activePursuits[playerId].distanceCounter = 0
     end
 end)
@@ -246,7 +302,18 @@ end)
 -- Limpar perseguição quando o jogador sair do servidor
 AddEventHandler('playerDropped', function()
     local playerId = source
+    DebugLog("Jogador " .. playerId .. " saiu do servidor")
+    
     if activePursuits[playerId] then
+        DebugLog("Limpando perseguição de jogador que saiu")
         EndPursuit(playerId, false, "Jogador saiu do servidor")
     end
+end)
+
+-- Inicialização
+AddEventHandler('onResourceStart', function(resourceName)
+    if (GetCurrentResourceName() ~= resourceName) then
+        return
+    end
+    DebugLog("Recurso iniciado")
 end)
